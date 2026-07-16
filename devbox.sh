@@ -1,5 +1,3 @@
-
-
 #!/usr/bin/env bash
 
 set -e
@@ -20,7 +18,10 @@ EOF
 
 ###############################################
 
-usage() {
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/config.json"
+
+short_usage() {
 cat << EOF
 
 Usage:
@@ -28,13 +29,33 @@ Usage:
   $0 start   <container-name>
   $0 stop    <container-name>
   $0 remove  <container-name>
-  $0 status <container-name>
+  $0 status  <container-name>
+  $0 ls
+  $0 help
+
+Run '$0 help' for full details.
+
+EOF
+exit 0
+}
+
+full_usage() {
+cat << EOF
+
+Usage:
+  $0 install <container-name>
+  $0 start   <container-name>
+  $0 stop    <container-name>
+  $0 remove  <container-name>
+  $0 status  <container-name>
+  $0 ls
   $0 help
 
 
 Description:
   install   Create container, install Git & SSH,
-            configure Git and generate SSH key.
+            configure Git, generate SSH key, and set
+            the GitHub remote (origin) for the repo.
 
   start     Start the container (if needed) and open
             a shell directly in /workspace.
@@ -46,18 +67,108 @@ Description:
   status    Show the status of the container, including
             Git configuration and SSH key.
 
+  ls        List all stored credentials/config for every
+            container (from config.json).
+
 EOF
+
+cat << "EOF"
+============================================================
+              GitHub Authentication Setup
+============================================================
+
+1. Copy the "SSH Public Key" from the container.
+
+   GitHub:
+     Profile
+       └── Settings
+             └── Developer Settings
+                   └── SSH and GPG keys
+                         └── SSH keys
+                               └── New SSH key
+
+   URL: https://github.com/settings/keys
+
+------------------------------------------------------------
+
+2. Create a "Personal Access Token (Classic)".
+
+   GitHub:
+     Profile
+       └── Settings
+             └── Developer Settings
+                   └── Personal access tokens
+                         └── Tokens (classic)
+                               └── Generate new token
+                                     └── Generate new token (classic)
+
+   URL: https://github.com/settings/tokens
+
+============================================================
+EOF
+
 exit 0
 }
 
 ###############################################
+# CONFIG.JSON HELPERS (require jq)
+###############################################
 
-ACTION="$1"
-CONTAINER_NAME="$2"
+ensure_jq() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[+] jq not found. Installing jq..."
+        sudo apt update
+        sudo apt install -y jq
+    fi
+}
 
-[[ "$ACTION" == "help" || "$ACTION" == "-h" || "$ACTION" == "--help" ]] && usage
+ensure_config_file() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "{}" > "$CONFIG_FILE"
+    fi
+}
 
-[[ -z "$ACTION" || -z "$CONTAINER_NAME" ]] && usage
+# save_config <container> <git_username> <git_email> <repo_name> <ssh_pub_key>
+save_config() {
+    local name="$1" user="$2" email="$3" repo="$4" pubkey="$5"
+
+    ensure_jq
+    ensure_config_file
+
+    tmp="$(mktemp)"
+
+    jq \
+        --arg name "$name" \
+        --arg user "$user" \
+        --arg email "$email" \
+        --arg repo "$repo" \
+        --arg pubkey "$pubkey" \
+        '.[$name] = {
+            "container_name": $name,
+            "git_username": $user,
+            "git_email": $email,
+            "repo_name": $repo,
+            "ssh_public_key": $pubkey
+        }' "$CONFIG_FILE" > "$tmp"
+
+    mv "$tmp" "$CONFIG_FILE"
+}
+
+# get_config_field <container> <field>
+get_config_field() {
+    local name="$1" field="$2"
+    ensure_jq
+    ensure_config_file
+    jq -r --arg name "$name" --arg field "$field" \
+        '.[$name][$field] // empty' "$CONFIG_FILE"
+}
+
+config_exists() {
+    local name="$1"
+    ensure_jq
+    ensure_config_file
+    [ "$(jq -r --arg name "$name" 'has($name)' "$CONFIG_FILE")" = "true" ]
+}
 
 ###############################################
 # INSTALL
@@ -74,6 +185,9 @@ install_container() {
         echo "[✓] Podman already installed."
     fi
 
+    ensure_jq
+    ensure_config_file
+
     if podman container exists "$CONTAINER_NAME"; then
         echo
         echo "[✓] Container '$CONTAINER_NAME' already exists."
@@ -81,8 +195,9 @@ install_container() {
     fi
 
     echo
-    read -rp "Git Username : " GIT_USERNAME
-    read -rp "Git Email    : " GIT_EMAIL
+    read -rp "Git Username     : " GIT_USERNAME
+    read -rp "Git Email        : " GIT_EMAIL
+    read -rp "GitHub Repo Name : " REPO_NAME
 
     echo
     echo "[+] Creating container..."
@@ -127,6 +242,28 @@ install_container() {
         fi
     "
 
+    echo "[+] Setting Git remote 'origin'..."
+
+    podman exec "$CONTAINER_NAME" bash -c "
+        cd /workspace &&
+        if [ -d .git ]; then
+            if git remote | grep -q '^origin\$'; then
+                git remote set-url origin 'git@github.com:${GIT_USERNAME}/${REPO_NAME}.git'
+            else
+                git remote add origin 'git@github.com:${GIT_USERNAME}/${REPO_NAME}.git'
+            fi
+        else
+            echo '[!] /workspace is not a git repo yet — skipping remote setup.'
+            echo '    (run: git init && git remote add origin git@github.com:${GIT_USERNAME}/${REPO_NAME}.git)'
+        fi
+    "
+
+    SSH_PUBKEY="$(podman exec "$CONTAINER_NAME" bash -c "cat /root/.ssh/id_ed25519.pub")"
+
+    echo "[+] Saving credentials to config.json..."
+
+    save_config "$CONTAINER_NAME" "$GIT_USERNAME" "$GIT_EMAIL" "$REPO_NAME" "$SSH_PUBKEY"
+
     echo
     echo "=========================================="
     echo "Git Configuration"
@@ -146,7 +283,13 @@ install_container() {
     echo "Public SSH Key"
     echo "=========================================="
 
-    podman exec "$CONTAINER_NAME" bash -c "cat /root/.ssh/id_ed25519.pub"
+    echo "$SSH_PUBKEY"
+
+    echo
+    echo "=========================================="
+    echo "Git Remote"
+    echo "=========================================="
+    echo "origin -> git@github.com:${GIT_USERNAME}/${REPO_NAME}.git"
 
     echo
     echo "=========================================="
@@ -224,6 +367,14 @@ remove_container() {
     podman rm "$CONTAINER_NAME" >/dev/null
 
     echo "[✓] Container removed."
+
+    if config_exists "$CONTAINER_NAME"; then
+        ensure_jq
+        tmp="$(mktemp)"
+        jq --arg name "$CONTAINER_NAME" 'del(.[$name])' "$CONFIG_FILE" > "$tmp"
+        mv "$tmp" "$CONFIG_FILE"
+        echo "[✓] Removed credentials from config.json."
+    fi
 }
 
 # ==========================================
@@ -296,11 +447,63 @@ status_container() {
         fi
 
 '
+
+    echo
+    echo "=========================================="
+    echo "Git Remote (origin)"
+    echo "=========================================="
+    podman exec "$CONTAINER_NAME" bash -c "cd /workspace && git remote -v 2>/dev/null || echo 'No git remote configured.'"
+}
+
+###############################################
+# LS  (list all stored credentials)
+###############################################
+
+list_config() {
+    ensure_jq
+    ensure_config_file
+
+    COUNT="$(jq 'length' "$CONFIG_FILE")"
+
+    if [ "$COUNT" -eq 0 ]; then
+        echo "[!] No containers found in config.json."
+        exit 0
+    fi
+
+    echo "=========================================="
+    echo "Stored Credentials (config.json)"
+    echo "=========================================="
+    echo
+
+    jq -r '
+        to_entries[] |
+        "Container Name : \(.value.container_name)\n" +
+        "Git Username   : \(.value.git_username)\n" +
+        "Git Email      : \(.value.git_email)\n" +
+        "Repo Name      : \(.value.repo_name)\n" +
+        "SSH Public Key : \(.value.ssh_public_key)\n" +
+        "------------------------------------------"
+    ' "$CONFIG_FILE"
 }
 
 ###############################################
 # MAIN
 ###############################################
+
+ACTION="$1"
+CONTAINER_NAME="$2"
+
+# No argument at all -> short usage only
+[[ -z "$ACTION" ]] && short_usage
+
+# help / -h / --help -> full usage including GitHub auth guide
+[[ "$ACTION" == "help" || "$ACTION" == "-h" || "$ACTION" == "--help" ]] && full_usage
+
+# ls -> list stored credentials (no container name required)
+[[ "$ACTION" == "ls" ]] && { list_config; exit 0; }
+
+# All other actions require a container name
+[[ -z "$CONTAINER_NAME" ]] && short_usage
 
 case "$ACTION" in
     install)
@@ -318,10 +521,7 @@ case "$ACTION" in
     status)
         status_container
         ;;
-    help|-h|--help)
-        usage
-        ;;
     *)
-        usage
+        short_usage
         ;;
 esac
