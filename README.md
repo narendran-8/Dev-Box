@@ -104,6 +104,7 @@ No changes are required to your host Git configuration.
 
 Before using this project, make sure you have the following installed:
 
+- Remote repo
 - **Podman** (required)
 - Internet connection (for the initial Ubuntu image download and package installation)
 
