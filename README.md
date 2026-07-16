@@ -114,33 +114,32 @@ Before using this project, make sure you have the following installed:
 Create a new development container.
 
 ```bash
-./setup_git_container.sh install personal-git
+./devbox.sh install personal-git
 ```
 
 Start the container.
 
 ```bash
-./setup_git_container.sh start personal-git
+./devbox.sh start personal-git
 ```
 
 Check container and GitHub status.
 
 ```bash
-./setup_git_container.sh status personal-git
+./devbox.sh status personal-git
 ```
 
 Stop the container.
 
 ```bash
-./setup_git_container.sh stop personal-git
+./devbox.sh stop personal-git
 ```
 
 Remove the container.
 
 ```bash
-./setup_git_container.sh remove personal-git
+./devbox.sh remove personal-git
 ```
-
 ---
 
 ### Typical Workflow
